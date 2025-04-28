@@ -1,0 +1,623 @@
+# Copyright (c) Mainflux
+# SPDX-License-Identifier: Apache-2.0
+
+version: "3.7"
+
+networks:
+  mainfluxlabs-base-net:
+    driver: bridge
+
+volumes:
+  mainfluxlabs-auth-db-volume:
+  mainfluxlabs-users-db-volume:
+  mainfluxlabs-things-db-volume:
+  mainfluxlabs-auth-redis-volume:
+  mainfluxlabs-es-redis-volume:
+  mainfluxlabs-mqtt-broker-volume:
+  mainfluxlabs-mqtt-db-volume:
+  mainfluxlabs-postgres-volume:
+  mainfluxlabs-filestore-db-volume:
+  mainfluxlabs-filestore-volume:
+  mainfluxlabs-webhooks-db-volume:
+  mainfluxlabs-smtp-notifier-db-volume:
+  mainfluxlabs-smpp-notifier-db-volume:
+  mosquitto-data:
+  mosquitto-log:
+  mosquitto-config:
+  grafana_data:
+services:
+  ui:
+    image: ${MF_RELEASE_PREFIX}/ui:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-ui
+    restart: on-failure
+    ports:
+      - ${MF_UI_PORT}:${MF_UI_PORT}
+    networks:
+      - mainfluxlabs-base-net
+    environment:
+      MF_UI_PORT: ${MF_UI_PORT}
+      MF_UI_MQTT_WS_URL: ${MF_UI_MQTT_WS_URL}
+      MF_PROXY_AUTH: ${MF_PROXY_AUTH}
+      MF_PROXY_LOGOUT_URL: ${MF_PROXY_LOGOUT_URL}
+      MF_UI_APP_PREFIX: ${MF_UI_APP_PREFIX}
+    command: /entrypoint.sh
+
+  nginx:
+    image: nginx:1.20.0-alpine
+    container_name: mainfluxlabs-nginx
+    restart: on-failure
+    volumes:
+      - ./nginx/nginx-${AUTH-key}.conf:/etc/nginx/nginx.conf.template
+      - ./nginx/entrypoint.sh:/docker-entrypoint.d/entrypoint.sh
+      - ./nginx/snippets:/etc/nginx/snippets
+      - ./ssl/authorization.js:/etc/nginx/authorization.js
+      - ./ssl/certs/mainfluxlabs-server.crt:/etc/ssl/certs/mainfluxlabs-server.crt
+      - ./ssl/certs/ca.crt:/etc/ssl/certs/ca.crt
+      - ./ssl/certs/mainfluxlabs-server.key:/etc/ssl/private/mainfluxlabs-server.key
+      - ./ssl/dhparam.pem:/etc/ssl/certs/dhparam.pem
+    ports:
+      - ${MF_NGINX_HTTP_PORT}:${MF_NGINX_HTTP_PORT}
+      - ${MF_NGINX_SSL_PORT}:${MF_NGINX_SSL_PORT}
+      - ${MF_NGINX_MQTT_PORT}:${MF_NGINX_MQTT_PORT}
+      - ${MF_NGINX_MQTTS_PORT}:${MF_NGINX_MQTTS_PORT}
+    networks:
+      - mainfluxlabs-base-net
+    env_file:
+      - .env
+    depends_on:
+      - things
+      - users
+      - mqtt-adapter
+      - http-adapter
+
+  broker:
+    extends:
+      file: brokers/nats.yml
+      service: broker
+    container_name: mainfluxlabs-broker
+    restart: on-failure
+    networks:
+      - mainfluxlabs-base-net
+
+  ## AUTH SERVICE
+  auth-db:
+    image: postgres:13.3-alpine
+    container_name: mainfluxlabs-auth-db
+    restart: on-failure
+    environment:
+      POSTGRES_USER: ${MF_AUTH_DB_USER}
+      POSTGRES_PASSWORD: ${MF_AUTH_DB_PASS}
+      POSTGRES_DB: ${MF_AUTH_DB}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-auth-db-volume:/var/lib/postgresql/data
+
+  auth:
+    image: mainfluxlabs/auth:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-auth
+    depends_on:
+      - auth-db
+    expose:
+      - ${MF_AUTH_GRPC_PORT}
+    restart: on-failure
+    environment:
+      MF_AUTH_LOG_LEVEL: ${MF_AUTH_LOG_LEVEL}
+      MF_AUTH_DB_HOST: auth-db
+      MF_AUTH_DB_PORT: ${MF_AUTH_DB_PORT}
+      MF_AUTH_DB_USER: ${MF_AUTH_DB_USER}
+      MF_AUTH_DB_PASS: ${MF_AUTH_DB_PASS}
+      MF_AUTH_DB: ${MF_AUTH_DB}
+      MF_AUTH_HTTP_PORT: ${MF_AUTH_HTTP_PORT}
+      MF_AUTH_GRPC_PORT: ${MF_AUTH_GRPC_PORT}
+      MF_AUTH_SECRET: ${MF_AUTH_SECRET}
+      MF_AUTH_LOGIN_TOKEN_DURATION: ${MF_AUTH_LOGIN_TOKEN_DURATION}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_USERS_ADMIN_EMAIL: ${MF_USERS_ADMIN_EMAIL}
+      MF_USERS_GRPC_URL: ${MF_USERS_GRPC_URL}
+      MF_USERS_CA_CERTS: ${MF_USERS_CA_CERTS}
+      MF_USERS_CLIENT_TLS: ${MF_USERS_CLIENT_TLS}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_CA_CERTS: ${MF_THINGS_CA_CERTS}
+      MF_THINGS_CLIENT_TLS: ${MF_THINGS_CLIENT_TLS}
+    ports:
+      - ${MF_AUTH_HTTP_PORT}:${MF_AUTH_HTTP_PORT}
+      - ${MF_AUTH_GRPC_PORT}:${MF_AUTH_GRPC_PORT}
+    networks:
+      - mainfluxlabs-base-net
+
+  users-db:
+    image: postgres:13.3-alpine
+    container_name: mainfluxlabs-users-db
+    restart: on-failure
+    environment:
+      POSTGRES_USER: ${MF_USERS_DB_USER}
+      POSTGRES_PASSWORD: ${MF_USERS_DB_PASS}
+      POSTGRES_DB: ${MF_USERS_DB}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-users-db-volume:/var/lib/postgresql/data
+
+  users:
+    image: mainfluxlabs/users:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-users
+    volumes:
+      - ./templates/${MF_USERS_RESET_PWD_TEMPLATE}:/${MF_EMAIL_TEMPLATE}
+    depends_on:
+      - users-db
+      - auth
+    expose:
+      - ${MF_USERS_GRPC_PORT}
+    restart: on-failure
+    environment:
+      MF_USERS_LOG_LEVEL: ${MF_USERS_LOG_LEVEL}
+      MF_USERS_DB_HOST: users-db
+      MF_USERS_DB_PORT: ${MF_USERS_DB_PORT}
+      MF_USERS_DB_USER: ${MF_USERS_DB_USER}
+      MF_USERS_DB_PASS: ${MF_USERS_DB_PASS}
+      MF_USERS_DB: ${MF_USERS_DB}
+      MF_USERS_HTTP_PORT: ${MF_USERS_HTTP_PORT}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_EMAIL_HOST: ${MF_EMAIL_HOST}
+      MF_EMAIL_PORT: ${MF_EMAIL_PORT}
+      MF_EMAIL_USERNAME: ${MF_EMAIL_USERNAME}
+      MF_EMAIL_PASSWORD: ${MF_EMAIL_PASSWORD}
+      MF_EMAIL_FROM_ADDRESS: ${MF_EMAIL_FROM_ADDRESS}
+      MF_EMAIL_FROM_NAME: ${MF_EMAIL_FROM_NAME}
+      MF_EMAIL_TEMPLATE: ${MF_EMAIL_TEMPLATE}
+      MF_TOKEN_RESET_ENDPOINT: ${MF_TOKEN_RESET_ENDPOINT}
+      MF_AUTH_GRPC_URL: ${MF_AUTH_GRPC_URL}
+      MF_AUTH_GRPC_TIMEOUT: ${MF_AUTH_GRPC_TIMEOUT}
+      MF_USERS_ADMIN_EMAIL: ${MF_USERS_ADMIN_EMAIL}
+      MF_USERS_ADMIN_PASSWORD: ${MF_USERS_ADMIN_PASSWORD}
+      MF_USERS_ALLOW_SELF_REGISTER: ${MF_USERS_ALLOW_SELF_REGISTER}
+      MF_USERS_GRPC_PORT: ${MF_USERS_GRPC_PORT}
+    ports:
+      - ${MF_USERS_HTTP_PORT}:${MF_USERS_HTTP_PORT}
+      - ${MF_USERS_GRPC_PORT}:${MF_USERS_GRPC_PORT}
+    networks:
+      - mainfluxlabs-base-net
+
+  things-db:
+    image: postgres:13.3-alpine
+    container_name: mainfluxlabs-things-db
+    restart: on-failure
+    environment:
+      POSTGRES_USER: ${MF_THINGS_DB_USER}
+      POSTGRES_PASSWORD: ${MF_THINGS_DB_PASS}
+      POSTGRES_DB: ${MF_THINGS_DB}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-things-db-volume:/var/lib/postgresql/data
+
+  auth-redis:
+    image: redis:6.2.2-alpine
+    container_name: mainfluxlabs-auth-redis
+    restart: on-failure
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-auth-redis-volume:/data
+
+  things:
+    image: mainfluxlabs/things:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-things
+    depends_on:
+      - things-db
+      - auth
+    restart: on-failure
+    environment:
+      MF_THINGS_LOG_LEVEL: ${MF_THINGS_LOG_LEVEL}
+      MF_THINGS_DB_HOST: things-db
+      MF_THINGS_DB_PORT: ${MF_THINGS_DB_PORT}
+      MF_THINGS_DB_USER: ${MF_THINGS_DB_USER}
+      MF_THINGS_DB_PASS: ${MF_THINGS_DB_PASS}
+      MF_THINGS_DB: ${MF_THINGS_DB}
+      MF_THINGS_CACHE_URL: auth-redis:${MF_REDIS_TCP_PORT}
+      MF_THINGS_ES_URL: es-redis:${MF_REDIS_TCP_PORT}
+      MF_THINGS_HTTP_PORT: ${MF_THINGS_HTTP_PORT}
+      MF_THINGS_AUTH_HTTP_PORT: ${MF_THINGS_AUTH_HTTP_PORT}
+      MF_THINGS_AUTH_GRPC_PORT: ${MF_THINGS_AUTH_GRPC_PORT}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_AUTH_GRPC_URL: ${MF_AUTH_GRPC_URL}
+      MF_AUTH_GRPC_TIMEOUT: ${MF_AUTH_GRPC_TIMEOUT}
+      MF_USERS_GRPC_URL: ${MF_USERS_GRPC_URL}
+      MF_USERS_CA_CERTS: ${MF_USERS_CA_CERTS}
+      MF_USERS_CLIENT_TLS: ${MF_USERS_CLIENT_TLS}
+    ports:
+      - ${MF_THINGS_HTTP_PORT}:${MF_THINGS_HTTP_PORT}
+      - ${MF_THINGS_AUTH_HTTP_PORT}:${MF_THINGS_AUTH_HTTP_PORT}
+      - ${MF_THINGS_AUTH_GRPC_PORT}:${MF_THINGS_AUTH_GRPC_PORT}
+    networks:
+      - mainfluxlabs-base-net
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.20
+    container_name: mainfluxlabs-jaeger
+    restart: on-failure
+    ports:
+      - ${MF_JAEGER_PORT}:${MF_JAEGER_PORT}/udp
+      - ${MF_JAEGER_FRONTEND}:${MF_JAEGER_FRONTEND}
+      - ${MF_JAEGER_COLLECTOR}:${MF_JAEGER_COLLECTOR}
+      - ${MF_JAEGER_CONFIGS}:${MF_JAEGER_CONFIGS}
+    networks:
+      - mainfluxlabs-base-net
+
+  vernemq:
+    image: mainfluxlabs/vernemq:0.13.2-arm64
+    container_name: mainfluxlabs-vernemq
+    restart: on-failure
+    environment:
+      DOCKER_VERNEMQ_ALLOW_ANONYMOUS: ${MF_DOCKER_VERNEMQ_ALLOW_ANONYMOUS}
+      DOCKER_VERNEMQ_LOG__CONSOLE__LEVEL: ${MF_DOCKER_VERNEMQ_LOG__CONSOLE__LEVEL}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-mqtt-broker-volume:/var/lib/vernemq
+
+  mqtt-db:
+    image: postgres:13.3-alpine
+    container_name: mainfluxlabs-mqtt-db
+    ports:
+      - "5432:5432"
+    restart: on-failure
+    environment:
+      - POSTGRES_USER=${MF_MQTT_ADAPTER_DB_USER}
+      - POSTGRES_PASSWORD=${MF_MQTT_ADAPTER_DB_PASS}
+      - POSTGRES_DB=${MF_MQTT_ADAPTER_DB}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-mqtt-db-volume:/var/lib/postgresql/data
+  mqtt-adapter:
+    image: mainfluxlabs/mqtt:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-mqtt
+    depends_on:
+      - vernemq
+      - things
+      - broker
+      - mqtt-db
+    restart: on-failure
+    environment:
+      MF_MQTT_ADAPTER_LOG_LEVEL: ${MF_MQTT_ADAPTER_LOG_LEVEL}
+      MF_MQTT_ADAPTER_MQTT_PORT: ${MF_MQTT_ADAPTER_MQTT_PORT}
+      MF_MQTT_ADAPTER_WS_PORT: ${MF_MQTT_ADAPTER_WS_PORT}
+      MF_MQTT_ADAPTER_HTTP_PORT: ${MF_MQTT_ADAPTER_HTTP_PORT}
+      MF_MQTT_ADAPTER_ES_URL: es-redis:${MF_REDIS_TCP_PORT}
+      MF_BROKER_URL: ${MF_BROKER_URL}
+      MF_MQTT_ADAPTER_MQTT_TARGET_HOST: vernemq
+      MF_MQTT_ADAPTER_MQTT_TARGET_PORT: ${MF_MQTT_BROKER_PORT}
+      MF_MQTT_ADAPTER_MQTT_TARGET_HEALTH_CHECK: http://vernemq:8888/health
+      MF_MQTT_ADAPTER_WS_TARGET_HOST: vernemq
+      MF_MQTT_ADAPTER_WS_TARGET_PORT: ${MF_MQTT_BROKER_WS_PORT}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_AUTH_GRPC_TIMEOUT: ${MF_THINGS_AUTH_GRPC_TIMEOUT}
+      MF_AUTH_CACHE_URL: auth-redis:${MF_REDIS_TCP_PORT}
+      MF_MQTT_ADAPTER_DB_PORT: ${MF_MQTT_ADAPTER_DB_PORT}
+      MF_MQTT_ADAPTER_DB_USER: ${MF_MQTT_ADAPTER_DB_USER}
+      MF_MQTT_ADAPTER_DB_PASS: ${MF_MQTT_ADAPTER_DB_PASS}
+      MF_MQTT_ADAPTER_DB: ${MF_MQTT_ADAPTER_DB}
+      MF_MQTT_ADAPTER_DB_HOST: ${MF_MQTT_ADAPTER_DB_HOST}
+      MF_MQTT_ADAPTER_DB_SSL_MODE: ${MF_MQTT_ADAPTER_DB_SSL_MODE}
+      MF_MQTT_ADAPTER_DB_SSL_CERT: ${MF_MQTT_ADAPTER_DB_SSL_CERT}
+      MF_AUTH_GRPC_URL: ${MF_AUTH_GRPC_URL}
+    ports:
+      - ${MF_MQTT_ADAPTER_HTTP_PORT}:${MF_MQTT_ADAPTER_HTTP_PORT}
+
+    networks:
+      - mainfluxlabs-base-net
+
+  http-adapter:
+    image: mainfluxlabs/http:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-http
+    depends_on:
+      - things
+      - broker
+    restart: on-failure
+    environment:
+      MF_HTTP_ADAPTER_LOG_LEVEL: debug
+      MF_HTTP_ADAPTER_PORT: ${MF_HTTP_ADAPTER_PORT}
+      MF_BROKER_URL: ${MF_NATS_URL}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_AUTH_GRPC_TIMEOUT: ${MF_THINGS_AUTH_GRPC_TIMEOUT}
+    ports:
+      - ${MF_HTTP_ADAPTER_PORT}:${MF_HTTP_ADAPTER_PORT}
+    networks:
+      - mainfluxlabs-base-net
+
+  es-redis:
+    image: redis:6.2.2-alpine
+    container_name: mainfluxlabs-es-redis
+    restart: on-failure
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-es-redis-volume:/data
+
+  coap-adapter:
+    image: mainfluxlabs/coap:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-coap
+    depends_on:
+      - things
+      - broker
+    restart: on-failure
+    environment:
+      MF_COAP_ADAPTER_LOG_LEVEL: ${MF_COAP_ADAPTER_LOG_LEVEL}
+      MF_COAP_ADAPTER_PORT: ${MF_COAP_ADAPTER_PORT}
+      MF_BROKER_URL: ${MF_NATS_URL}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_AUTH_GRPC_TIMEOUT: ${MF_THINGS_AUTH_GRPC_TIMEOUT}
+    ports:
+      - ${MF_COAP_ADAPTER_PORT}:${MF_COAP_ADAPTER_PORT}/udp
+      - ${MF_COAP_ADAPTER_PORT}:${MF_COAP_ADAPTER_PORT}/tcp
+    networks:
+      - mainfluxlabs-base-net
+
+  ws-adapter:
+    image: mainfluxlabs/ws:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-ws
+    depends_on:
+      - things
+      - broker
+    restart: on-failure
+    environment:
+      MF_WS_ADAPTER_LOG_LEVEL: ${MF_WS_ADAPTER_LOG_LEVEL}
+      MF_WS_ADAPTER_PORT: ${MF_WS_ADAPTER_PORT}
+      MF_BROKER_URL: ${MF_BROKER_URL}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_AUTH_GRPC_TIMEOUT: ${MF_THINGS_AUTH_GRPC_TIMEOUT}
+    ports:
+      - ${MF_WS_ADAPTER_PORT}:${MF_WS_ADAPTER_PORT}
+    networks:
+      - mainfluxlabs-base-net
+
+  ## POSTGRES DB
+  postgres:
+    image: postgres:13.3-alpine
+    container_name: mainfluxlabs-postgres
+    ports:
+      - "5433:5432"
+    restart: on-failure
+    environment:
+      POSTGRES_USER: ${MF_POSTGRES_WRITER_DB_USER}
+      POSTGRES_PASSWORD: ${MF_POSTGRES_WRITER_DB_PASS}
+      POSTGRES_DB: ${MF_POSTGRES_WRITER_DB}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-postgres-volume:/var/lib/postgresql/data
+
+  postgres-writer:
+    image: mainfluxlabs/postgres-writer:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-postgres-writer
+    depends_on:
+      - postgres
+    restart: on-failure
+    environment:
+      MF_BROKER_URL: ${MF_BROKER_URL}
+      MF_POSTGRES_WRITER_LOG_LEVEL: ${MF_POSTGRES_WRITER_LOG_LEVEL}
+      MF_POSTGRES_WRITER_PORT: ${MF_POSTGRES_WRITER_PORT}
+      MF_POSTGRES_WRITER_DB_HOST: postgres
+      MF_POSTGRES_WRITER_DB_PORT: ${MF_POSTGRES_WRITER_DB_PORT}
+      MF_POSTGRES_WRITER_DB_USER: ${MF_POSTGRES_WRITER_DB_USER}
+      MF_POSTGRES_WRITER_DB_PASS: ${MF_POSTGRES_WRITER_DB_PASS}
+      MF_POSTGRES_WRITER_DB: ${MF_POSTGRES_WRITER_DB}
+      MF_POSTGRES_WRITER_DB_SSL_MODE: ${MF_POSTGRES_WRITER_DB_SSL_MODE}
+      MF_POSTGRES_WRITER_DB_SSL_CERT: ${MF_POSTGRES_WRITER_DB_SSL_CERT}
+      MF_POSTGRES_WRITER_DB_SSL_KEY: ${MF_POSTGRES_WRITER_DB_SSL_KEY}
+      MF_POSTGRES_WRITER_DB_SSL_ROOT_CERT: ${MF_POSTGRES_WRITER_DB_SSL_ROOT_CERT}
+    ports:
+      - ${MF_POSTGRES_WRITER_PORT}:${MF_POSTGRES_WRITER_PORT}
+    networks:
+      - mainfluxlabs-base-net
+
+  postgres-reader:
+    image: mainfluxlabs/postgres-reader:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-postgres-reader
+    restart: on-failure
+    environment:
+      MF_POSTGRES_READER_LOG_LEVEL: ${MF_POSTGRES_READER_LOG_LEVEL}
+      MF_POSTGRES_READER_PORT: ${MF_POSTGRES_READER_PORT}
+      MF_POSTGRES_READER_CLIENT_TLS: ${MF_POSTGRES_READER_CLIENT_TLS}
+      MF_POSTGRES_READER_CA_CERTS: ${MF_POSTGRES_READER_CA_CERTS}
+      MF_POSTGRES_READER_DB_HOST: postgres
+      MF_POSTGRES_READER_DB_PORT: ${MF_POSTGRES_READER_DB_PORT}
+      MF_POSTGRES_READER_DB_USER: ${MF_POSTGRES_READER_DB_USER}
+      MF_POSTGRES_READER_DB_PASS: ${MF_POSTGRES_READER_DB_PASS}
+      MF_POSTGRES_READER_DB: ${MF_POSTGRES_READER_DB}
+      MF_POSTGRES_READER_DB_SSL_MODE: ${MF_POSTGRES_READER_DB_SSL_MODE}
+      MF_POSTGRES_READER_DB_SSL_CERT: ${MF_POSTGRES_READER_DB_SSL_CERT}
+      MF_POSTGRES_READER_DB_SSL_KEY: ${MF_POSTGRES_READER_DB_SSL_KEY}
+      MF_POSTGRES_READER_DB_SSL_ROOT_CERT: ${MF_POSTGRES_READER_DB_SSL_ROOT_CERT}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_AUTH_GRPC_TIMEOUT: ${MF_THINGS_AUTH_GRPC_TIMEOUT}
+      MF_AUTH_GRPC_URL: ${MF_AUTH_GRPC_URL}
+      MF_AUTH_GRPC_TIMEOUT : ${MF_AUTH_GRPC_TIMEOUT}
+    ports:
+      - ${MF_POSTGRES_READER_PORT}:${MF_POSTGRES_READER_PORT}
+    networks:
+      - mainfluxlabs-base-net
+
+  filestore-db:
+    image: postgres:13.3-alpine
+    container_name: mainfluxlabs-filestore-db
+    restart: on-failure
+    environment:
+      - POSTGRES_USER=${MF_FILESTORE_DB_USER}
+      - POSTGRES_PASSWORD=${MF_FILESTORE_DB_PASS}
+      - POSTGRES_DB=${MF_FILESTORE_DB}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-filestore-db-volume:/var/lib/postgresql/data
+
+  filestore:
+    image: ${MF_RELEASE_PREFIX}/filestore:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-filestore
+    depends_on:
+      - filestore-db
+    restart: on-failure
+    environment:
+      MF_FILESTORE_LOG_LEVEL: ${MF_FILESTORE_LOG_LEVEL}
+      MF_FILESTORE_DB_HOST: ${MF_FILESTORE_DB_HOST}
+      MF_FILESTORE_DB_PORT: ${MF_FILESTORE_DB_PORT}
+      MF_FILESTORE_DB_USER: ${MF_FILESTORE_DB_USER}
+      MF_FILESTORE_DB_PASS: ${MF_FILESTORE_DB_PASS}
+      MF_FILESTORE_DB: ${MF_FILESTORE_DB}
+      MF_FILESTORE_DB_SSL_MODE: ${MF_FILESTORE_DB_SSL_MODE}
+      MF_FILESTORE_DB_SSL_CERT: ${MF_FILESTORE_DB_SSL_CERT}
+      MF_FILESTORE_TLS: ${MF_FILESTORE_TLS}
+      MF_FILESTORE_HTTP_PORT: ${MF_FILESTORE_HTTP_PORT}
+      MF_FILESTORE_SERVER_CERT: ${MF_FILESTORE_SERVER_CERT}
+      MF_FILESTORE_SERVER_KEY: ${MF_FILESTORE_SERVER_KEY}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_FILESTORE_SECRET: ${MF_FILESTORE_SECRET}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_AUTH_GRPC_TIMEOUT: ${MF_THINGS_AUTH_GRPC_TIMEOUT}
+      MF_AUTH_GRPC_URL: ${MF_AUTH_GRPC_URL}
+      MF_AUTH_GRPC_TIMEOUT: ${MF_AUTH_GRPC_TIMEOUT}
+    ports:
+      - ${MF_FILESTORE_HTTP_PORT}:${MF_FILESTORE_HTTP_PORT}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-filestore-volume:/files
+
+  ## WEBHOOKS
+  webhooks-db:
+    image: postgres:13.3-alpine
+    container_name: mainfluxlabs-webhooks-db
+    restart: on-failure
+    environment:
+      POSTGRES_USER: ${MF_WEBHOOKS_DB_USER}
+      POSTGRES_PASSWORD: ${MF_WEBHOOKS_DB_PASS}
+      POSTGRES_DB: ${MF_WEBHOOKS_DB}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-webhooks-db-volume:/var/lib/postgresql/data
+
+  webhooks:
+    image: mainfluxlabs/webhooks:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-webhooks
+    depends_on:
+      - webhooks-db
+    restart: on-failure
+    environment:
+      MF_WEBHOOKS_LOG_LEVEL: ${MF_WEBHOOKS_LOG_LEVEL}
+      MF_BROKER_URL: ${MF_NATS_URL}
+      MF_WEBHOOKS_DB_HOST: webhooks-db
+      MF_WEBHOOKS_DB_PORT: ${MF_WEBHOOKS_DB_PORT}
+      MF_WEBHOOKS_DB_USER: ${MF_WEBHOOKS_DB_USER}
+      MF_WEBHOOKS_DB_PASS: ${MF_WEBHOOKS_DB_PASS}
+      MF_WEBHOOKS_DB: ${MF_WEBHOOKS_DB}
+      MF_WEBHOOKS_HTTP_PORT: ${MF_WEBHOOKS_HTTP_PORT}
+      MF_WEBHOOKS_SERVER_CERT: ${MF_WEBHOOKS_SERVER_CERT}
+      MF_WEBHOOKS_SERVER_KEY: ${MF_WEBHOOKS_SERVER_KEY}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_AUTH_GRPC_TIMEOUT: ${MF_THINGS_AUTH_GRPC_TIMEOUT}
+    ports:
+      - ${MF_WEBHOOKS_HTTP_PORT}:${MF_WEBHOOKS_HTTP_PORT}
+    networks:
+      - mainfluxlabs-base-net
+
+  smtp-notifier-db:
+    image: postgres:13.3-alpine
+    container_name: mainfluxlabs-smtp-notifier-db
+    restart: on-failure
+    environment:
+      POSTGRES_USER: ${MF_SMTP_NOTIFIER_DB_USER}
+      POSTGRES_PASSWORD: ${MF_SMTP_NOTIFIER_DB_PASS}
+      POSTGRES_DB: ${MF_SMTP_NOTIFIER_DB}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - mainfluxlabs-smtp-notifier-db-volume:/var/lib/postgresql/data
+
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: mainfluxlabs-grafana
+    depends_on:
+      - postgres
+    restart: on-failure
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: mainflux
+      GF_SECURITY_ADMIN_PASSWORD: mainflux
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - grafana_data:/var/lib/grafana
+  mosquitto:
+    restart: on-failure
+    image: eclipse-mosquitto:2.0
+    ports:
+      - "1884:1884"   # Cổng MQT 
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log  
+    networks:
+      - mainfluxlabs-base-net
+  mqtt_subscriber_service:
+    build: ./mqtt_subscriber_service  # Sử dụng đường dẫn chính xác
+    restart: on-failure
+    container_name: mqtt_subscriber_service
+    depends_on:
+      - mosquitto  # Đảm bảo dịch vụ MQTT broker của Mainflux đã chạy trước
+      - mqtt-db  # Nếu bạn đang sử dụng PostgreSQL cùng với Mainflux
+    environment:
+      - NODE_ENV=production
+      - PGUSER=mainflux
+      - PGPASSWORD=mainflux
+      - PGDATABASE=subscriptions
+    networks:
+      - mainfluxlabs-base-net
+
+  smtp-notifier:
+    image: mainfluxlabs/smtp-notifier:${MF_RELEASE_TAG}
+    container_name: mainfluxlabs-smtp-notifier
+    depends_on:
+      - smtp-notifier-db
+    restart: on-failure
+    environment:
+      MF_SMTP_NOTIFIER_LOG_LEVEL: ${MF_SMTP_NOTIFIER_LOG_LEVEL}
+      MF_SMTP_NOTIFIER_PORT: ${MF_SMTP_NOTIFIER_PORT}
+      MF_BROKER_URL: ${MF_BROKER_URL}
+      MF_JAEGER_URL: ${MF_JAEGER_URL}
+      MF_EMAIL_USERNAME: ${MF_EMAIL_USERNAME}
+      MF_EMAIL_PASSWORD: ${MF_EMAIL_PASSWORD}
+      MF_EMAIL_HOST: ${MF_EMAIL_HOST}
+      MF_EMAIL_PORT: ${MF_EMAIL_PORT}
+      MF_EMAIL_FROM_ADDRESS: ${MF_EMAIL_FROM_ADDRESS}
+      MF_EMAIL_FROM_NAME: ${MF_EMAIL_FROM_NAME}
+      MF_EMAIL_TEMPLATE: ${MF_EMAIL_TEMPLATE}
+      MF_SMTP_NOTIFIER_TEMPLATE: ${MF_SMTP_NOTIFIER_TEMPLATE}
+      MF_SMTP_NOTIFIER_FROM_ADDR: ${MF_SMTP_NOTIFIER_FROM_ADDR}
+      MF_SMTP_NOTIFIER_DB_HOST: smtp-notifier-db
+      MF_SMTP_NOTIFIER_DB_PORT: ${MF_SMTP_NOTIFIER_DB_PORT}
+      MF_SMTP_NOTIFIER_DB_USER: ${MF_SMTP_NOTIFIER_DB_USER}
+      MF_SMTP_NOTIFIER_DB_PASS: ${MF_SMTP_NOTIFIER_DB_PASS}
+      MF_SMTP_NOTIFIER_DB: ${MF_SMTP_NOTIFIER_DB}
+      MF_SMTP_NOTIFIER_SERVER_CERT: ${MF_SMTP_NOTIFIER_SERVER_CERT}
+      MF_SMTP_NOTIFIER_SERVER_KEY: ${MF_SMTP_NOTIFIER_SERVER_KEY}
+      MF_THINGS_AUTH_GRPC_URL: ${MF_THINGS_AUTH_GRPC_URL}
+      MF_THINGS_AUTH_GRPC_TIMEOUT: ${MF_THINGS_AUTH_GRPC_TIMEOUT}
+    ports:
+      - ${MF_SMTP_NOTIFIER_PORT}:${MF_SMTP_NOTIFIER_PORT}
+    networks:
+      - mainfluxlabs-base-net
+    volumes:
+      - ./templates/${MF_SMTP_NOTIFIER_TEMPLATE}:/${MF_EMAIL_TEMPLATE}
+
+# Copyright (c) Mainflux
+# SPDX-License-Identifier: Apache-2.0

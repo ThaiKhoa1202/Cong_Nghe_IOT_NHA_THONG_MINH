@@ -1,24 +1,10 @@
-# Docker Composition
+# Tiểu luận môn Lập trình IoT: Đề tài Platform Mainflux
 
-Configure environment variables and run Mainflux Docker Composition.
+## Các thành viên và mã số sinh viên làm tiểu luận:
+- Huỳnh Thái Khoa - 23050083
+- Nguyễn Mậu Tuấn Anh - 23050092
 
-*Note**: `docker-compose` uses `.env` file to set all environment variables. Ensure that you run the command from the same location as .env file.
-
-## Installation
-
-Follow the [official documentation](https://docs.docker.com/compose/install/).
-
-
-## Usage
-
-Run following commands from project root directory.
-
-```
-docker-compose -f docker/docker-compose.yml up
-```
-
-```
-docker-compose -f docker/addons/<path>/docker-compose.yml  up
-```
-
-To pull docker images from a specific release you need to change the value of `MF_RELEASE_TAG` in `.env` before running these commands.
+## Nội dung trong File:
+- Tài liệu code ardunio
+- Tài liệu File Docker gồm 3 ý chính chạy flatfrom :
+- Mqtt,Mosquitto,Docker-compose.
